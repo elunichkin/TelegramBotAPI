@@ -1,25 +1,47 @@
 import requests
 import json
 from collections import deque
+import postgresql
 
 
 class BotHandler:
-    def __init__(self, token):
+    def __init__(self, token, timeout=1, db=None):
         self.token = token
         self.url = "https://api.telegram.org/bot{}/".format(token)
+        self.offset = None
+        self.timeout = timeout
         self.updates = deque()
+        if db is not None:
+            self.dbconnector = DBConnector(url=db[0], user=db[1], password=db[2], schema=db[3])
 
     # API methods:
-    def get_updates(self, offset=None, timeout=10):
+    def get_updates(self, offset=None, timeout=1):
         method, params = 'getUpdates', {'offset': offset,
                                         'timeout': timeout}
-        response = deque(requests.get(self.url + method, params).json()['result'])
-        return response
 
-    def get_last_update(self, offset=None, timeout=10):
-        if len(self.updates) == 0:
-            self.updates = self.get_updates(offset=offset, timeout=timeout)
-        return self.updates.popleft() if len(self.updates) > 0 else None
+        response = requests.get(self.url + method, params).json()
+        try:
+            updates = deque(response['result'])
+        except KeyError as e:
+            print(e)
+            updates = []
+
+        return updates
+
+    def get_last_update(self):
+        while len(self.updates) == 0:
+            self.updates = self.get_updates(offset=self.offset, timeout=self.timeout)
+
+        last_update = self.updates.popleft()
+        update_id = last_update['update_id']
+        self.offset = update_id + 1
+
+        try:
+            self.dbconnector.log_update(update_id=update_id, update=last_update)
+        except postgresql.exceptions.UniqueError:
+            pass
+
+        return last_update
 
     def send_message(self, chat_id, text, reply_to_message_id=None, parse_mode=None):
         method, params = 'sendMessage', {'chat_id': chat_id,
@@ -70,3 +92,28 @@ class BotHandler:
                                                'can_promote_members': can_promote_members}
         response = requests.post(self.url + method, data=params)
         return response
+
+
+class DBConnector:
+    def __init__(self, url, user, password, schema):
+        self.url = url
+        self.user = user
+        self.password = password
+        self.schema = schema
+        self.db = postgresql.open('pq://{0}:{1}@{2}:5432/{0}'.format(user, password, url))
+
+    def log_update(self, update_id, update):
+        query = """
+            INSERT INTO {0}.updates (update_id, update_json) VALUES ({1}, '{2}')
+        """.format(self.schema, update_id, json.dumps(update))
+        self.db.execute(query)
+
+    def insert(self, table, columns, values):
+        query = """
+            INSERT INTO {0}.{1} ({2}) VALUES ({3})
+        """.format(self.schema, table, ', '.join(columns), ', '.join(values))
+        self.db.execute(query)
+
+    def custom_select(self, query):
+        query = query.format(self.schema)
+        return self.db.query(query)
