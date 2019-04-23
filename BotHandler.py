@@ -1,18 +1,30 @@
 import requests
 import json
+import pickle
 from collections import deque
 import postgresql
 
 
 class BotHandler:
-    def __init__(self, token, timeout=1, db=None):
-        self.token = token
-        self.url = "https://api.telegram.org/bot{}/".format(token)
+    def __init__(self, token=None, token_file=None, timeout=1, db=None, db_file=None):
+        if token:
+            self.token = token
+        elif token_file:
+            with open(token_file, 'rb') as infile:
+                self.token = pickle.load(infile)
+        else:
+            raise ValueError('No valid token provided')
+
+        self.url = "https://api.telegram.org/bot{}/".format(self.token)
         self.offset = None
         self.timeout = timeout
         self.updates = deque()
-        if db is not None:
+
+        if db:
             self.dbconnector = DBConnector(url=db[0], user=db[1], password=db[2], schema=db[3])
+        elif db_file:
+            with open(db_file, 'rb') as infile:
+                self.dbconnector = DBConnector(*pickle.load(infile))
 
     # API methods:
     def get_updates(self, offset=None, timeout=1):
@@ -48,7 +60,7 @@ class BotHandler:
                                          'text': text,
                                          'reply_to_message_id': reply_to_message_id,
                                          'parse_mode': parse_mode}
-        response = requests.post(self.url + method, data=params)
+        response = requests.get(self.url + method, data=params)
         return response
 
     def get_admins(self, chat_id):
@@ -113,6 +125,12 @@ class DBConnector:
             INSERT INTO {0}.{1} ({2}) VALUES ({3})
         """.format(self.schema, table, ', '.join(columns), ', '.join(values))
         self.db.execute(query)
+
+    def select(self, table, columns):
+        query = """
+            SELECT {0} FROM {1}.{2}
+        """.format(columns, self.schema, table)
+        return self.db.query(query)
 
     def custom_select(self, query):
         query = query.format(self.schema)
